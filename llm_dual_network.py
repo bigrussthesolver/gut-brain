@@ -5,16 +5,52 @@ from datetime import datetime
 import time
 import os
 from openai import OpenAI
-from dotenv import load_dotenv
+from dotenv import load_dotenv, find_dotenv
+import logging
 
-# Load environment variables
-load_dotenv()
+# Configure logging
+logging.basicConfig(
+    level=logging.DEBUG,
+    format='%(asctime)s - %(name)s - %(levelname)s - %(message)s'
+)
+logger = logging.getLogger(__name__)
 
-# Initialize OpenAI client
-client = OpenAI(api_key=os.getenv('OPENAI_API_KEY'))
+def load_env_variables():
+    """Load environment variables from .env file"""
+    dotenv_path = find_dotenv()
+    if not dotenv_path:
+        logger.error("No .env file found")
+        return False
+    
+    logger.debug(f"Loading environment variables from {dotenv_path}")
+    load_dotenv(dotenv_path, override=True)
+    
+    api_key = os.getenv('OPENAI_API_KEY')
+    if not api_key:
+        logger.error("OPENAI_API_KEY not found in environment variables")
+        return False
+    
+    logger.debug(f"Environment variables loaded successfully. API key: {api_key[:8]}...")
+    return True
+
+def get_openai_client():
+    """Get a fresh OpenAI client with the current API key"""
+    if not load_env_variables():
+        raise ValueError("Failed to load environment variables")
+    
+    api_key = os.getenv('OPENAI_API_KEY')
+    if not api_key:
+        raise ValueError("OPENAI_API_KEY not found after reloading environment")
+        
+    logger.debug(f"Creating new OpenAI client with API key: {api_key[:8]}...")
+    return OpenAI(api_key=api_key)
+
+# Initial environment load
+load_env_variables()
 
 class LLMGutNetwork:
     def __init__(self, state_size: int = 5):
+        logger.debug("Initializing LLMGutNetwork")
         self.state_size = state_size
         self.internal_state = np.zeros(state_size)
         self.homeostasis_target = np.ones(state_size) * 0.5
@@ -22,11 +58,19 @@ class LLMGutNetwork:
         self.stress_threshold = 0.7
         self.emotional_memory = []
         self.max_memory_size = 50
+        self.client = get_openai_client()
+        logger.debug("LLMGutNetwork initialized")
+    
+    def refresh_client(self):
+        """Refresh the OpenAI client with current environment variables"""
+        logger.debug("Refreshing OpenAI client for LLMGutNetwork")
+        self.client = get_openai_client()
         
     def process_emotional_content(self, text: str) -> Dict[str, float]:
         """Analyze emotional content of text using GPT-4"""
+        logger.debug(f"Processing emotional content: {text[:50]}...")
         try:
-            response = client.chat.completions.create(
+            response = self.client.chat.completions.create(
                 model="gpt-4o",
                 messages=[
                     {"role": "system", "content": "You will analyze the emotional content of text and output emotional scores."},
@@ -70,7 +114,7 @@ class LLMGutNetwork:
             return emotional_state
             
         except Exception as e:
-            print(f"Error in emotional analysis: {e}")
+            logger.error(f"Error in emotional analysis: {e}")
             return {'valence': 0.5, 'arousal': 0.5, 'dominance': 0.5}
     
     def update_emotional_memory(self, text: str, emotional_state: Dict[str, float]):
@@ -87,6 +131,7 @@ class LLMGutNetwork:
     
     def process_input(self, text_input: str) -> Tuple[Dict[str, float], float]:
         """Process text input and update internal state"""
+        logger.debug(f"Processing input: {text_input[:50]}...")
         emotional_state = self.process_emotional_content(text_input)
         
         # Convert emotional state to internal state vector
@@ -109,20 +154,69 @@ class LLMGutNetwork:
         self.update_emotional_memory(text_input, emotional_state)
         
         return emotional_state, stress_level
+    
+    def restore_emotional_memory(self, emotional_history: List[Dict]):
+        """Restore emotional memory from a saved session"""
+        logger.debug(f"Restoring emotional memory with {len(emotional_history)} states")
+        self.emotional_memory = emotional_history
+        
+        # Update internal state based on the most recent emotional state
+        if emotional_history:
+            latest_state = emotional_history[-1]
+            self.internal_state = np.array([
+                latest_state['valence'],
+                latest_state['arousal'],
+                latest_state['dominance'],
+                0.5,  # Default values for other dimensions
+                0.5
+            ])
+            logger.debug(f"Restored internal state: {self.internal_state}")
 
 class LLMBrainNetwork:
     def __init__(self, system_prompt: str = "You are a helpful assistant."):
+        logger.debug("Initializing LLMBrainNetwork")
         self.system_prompt = system_prompt
         self.conversation_history = []
         self.max_history = 10
         self.confidence_threshold = 0.6
         self.reflection_log = []
+        self.client = get_openai_client()
+        logger.debug("LLMBrainNetwork initialized")
+    
+    def refresh_client(self):
+        """Refresh the OpenAI client with current environment variables"""
+        logger.debug("Refreshing OpenAI client for LLMBrainNetwork")
+        self.client = get_openai_client()
+        
+    def restore_conversation_history(self, history: List[Dict]):
+        """Restore conversation history from a saved session"""
+        logger.debug(f"Restoring conversation history with {len(history)} messages")
+        # Validate and convert history format if needed
+        validated_history = []
+        for msg in history:
+            if isinstance(msg, dict) and 'content' in msg:
+                # If it's already in the correct format, just validate required fields
+                if 'role' not in msg:
+                    # Try to infer role from structure
+                    if 'metadata' in msg:
+                        msg['role'] = 'assistant'
+                    else:
+                        msg['role'] = 'user'
+                if 'timestamp' not in msg:
+                    msg['timestamp'] = datetime.now().isoformat()
+                validated_history.append(msg)
+            else:
+                logger.warning(f"Skipping invalid message format: {msg}")
+        
+        self.conversation_history = validated_history
+        logger.debug(f"Restored {len(self.conversation_history)} conversation entries")
     
     def generate_response(self, 
                          user_input: str, 
                          emotional_state: Dict[str, float], 
                          stress_level: float) -> Tuple[str, Dict]:
         """Generate response using GPT-4, considering emotional state"""
+        logger.debug(f"Generating response for input: {user_input[:50]}...")
         try:
             # Prepare conversation context
             emotional_context = (
@@ -133,16 +227,17 @@ class LLMBrainNetwork:
             )
             
             messages = [
-                {"role": "system", "content": f"{self.system_prompt}\n\nContext: {emotional_context}"},
-                {"role": "user", "content": user_input}
+                {"role": "system", "content": f"{self.system_prompt}\n\nContext: {emotional_context}"}
             ]
             
-            # Add relevant conversation history
-            for entry in self.conversation_history[-2:]:  # Last 2 exchanges
-                messages.append({"role": "user", "content": entry['user_input']})
-                messages.append({"role": "assistant", "content": entry['response']})
+            # Add conversation history
+            for entry in self.conversation_history[-self.max_history:]:
+                messages.append({"role": entry['role'], "content": entry['content']})
             
-            response = client.chat.completions.create(
+            # Add current user input
+            messages.append({"role": "user", "content": user_input})
+            
+            response = self.client.chat.completions.create(
                 model="gpt-4o",
                 messages=messages,
                 response_format={
@@ -196,7 +291,7 @@ class LLMBrainNetwork:
             return result['response_text'], metadata
             
         except Exception as e:
-            print(f"Error in response generation: {e}")
+            logger.error(f"Error in response generation: {e}")
             return f"I apologize, but I'm having trouble processing that right now.", {
                 'confidence': 0.1,
                 'emotional_influence': emotional_state,
@@ -206,19 +301,33 @@ class LLMBrainNetwork:
     
     def update_history(self, user_input: str, response: str, metadata: Dict):
         """Maintain conversation history with metadata"""
-        entry = {
-            'timestamp': datetime.now().isoformat(),
-            'user_input': user_input,
-            'response': response,
-            'metadata': metadata
+        logger.debug(f"Updating conversation history with input: {user_input[:50]}...")
+        timestamp = datetime.now().isoformat()
+        
+        # Add user message
+        user_message = {
+            "role": "user",
+            "content": user_input,
+            "timestamp": timestamp
         }
         
-        self.conversation_history.append(entry)
-        if len(self.conversation_history) > self.max_history:
-            self.conversation_history.pop(0)
+        # Add assistant message
+        assistant_message = {
+            "role": "assistant",
+            "content": response,
+            "metadata": metadata,
+            "timestamp": timestamp
+        }
+        
+        self.conversation_history.extend([user_message, assistant_message])
+        
+        # Trim history if needed
+        if len(self.conversation_history) > self.max_history * 2:  # *2 because each exchange has 2 messages
+            self.conversation_history = self.conversation_history[-self.max_history * 2:]
     
     def reflect_on_conversation(self) -> Dict:
         """Analyze conversation patterns and generate insights"""
+        logger.debug("Reflecting on conversation...")
         if not self.conversation_history:
             return {'insights': 'No conversation history available'}
         
@@ -226,6 +335,7 @@ class LLMBrainNetwork:
         emotional_trajectory = [
             entry['metadata']['emotional_influence']['valence'] 
             for entry in self.conversation_history
+            if entry['role'] == 'assistant' and 'metadata' in entry
         ]
         
         avg_emotion = np.mean(emotional_trajectory)
@@ -243,6 +353,7 @@ class LLMBrainNetwork:
     
     def calculate_confidence(self, response: str, stress_level: float) -> float:
         """Calculate confidence in the generated response"""
+        logger.debug(f"Calculating confidence for response: {response[:50]}...")
         # Lower confidence under high stress
         base_confidence = 1 - stress_level
         
@@ -251,17 +362,47 @@ class LLMBrainNetwork:
         
         confidence = base_confidence * response_length_factor
         return float(confidence)
+    
+    def restore_conversation_history(self, history: List[Dict]):
+        """Restore conversation history from a saved session"""
+        logger.debug(f"Restoring conversation history with {len(history)} messages")
+        # Validate and convert history format if needed
+        validated_history = []
+        for msg in history:
+            if isinstance(msg, dict) and 'content' in msg:
+                # If it's already in the correct format, just validate required fields
+                if 'role' not in msg:
+                    # Try to infer role from structure
+                    if 'metadata' in msg:
+                        msg['role'] = 'assistant'
+                    else:
+                        msg['role'] = 'user'
+                if 'timestamp' not in msg:
+                    msg['timestamp'] = datetime.now().isoformat()
+                validated_history.append(msg)
+            else:
+                logger.warning(f"Skipping invalid message format: {msg}")
+        
+        self.conversation_history = validated_history
+        logger.debug(f"Restored {len(self.conversation_history)} conversation entries")
 
 class LLMDualNetwork:
     def __init__(self, system_prompt: str = "You are a helpful assistant."):
+        logger.debug("Initializing LLMDualNetwork")
         self.gut = LLMGutNetwork()
         self.brain = LLMBrainNetwork(system_prompt)
-        self.llm = OpenAI(api_key=os.getenv('OPENAI_API_KEY'))
+        self.refresh_clients()
+        logger.debug("LLMDualNetwork initialized")
+    
+    def refresh_clients(self):
+        """Refresh all OpenAI clients with current environment variables"""
+        logger.debug("Refreshing all OpenAI clients")
+        self.gut.refresh_client()
+        self.brain.refresh_client()
     
     def process(self, user_input: str) -> Tuple[str, Dict]:
-        """
-        Process input through both networks and generate response
-        """
+        """Process input through both networks and generate response"""
+        logger.debug(f"Processing user input: {user_input[:50]}...")
         # Process through gut network first
         emotional_state, stress_level = self.gut.process_input(user_input)
         
@@ -280,55 +421,80 @@ class LLMDualNetwork:
     
     def analyze_session(self, chat_history, emotional_history):
         """Analyze the session using GPT-4 to provide insights about the conversation and emotional patterns"""
+        logger.debug("Starting session analysis")
         if not chat_history:
             return "No conversation to analyze yet."
         
-        # Prepare conversation summary
-        conversation = "\n".join([
-            f"{msg['role'].upper()}: {msg['content']}" 
-            for msg in chat_history
-        ])
-        
-        # Prepare emotional data summary
-        emotional_patterns = "No emotional data available."
-        if emotional_history:
-            avg_valence = sum(e['valence'] for e in emotional_history) / len(emotional_history)
-            avg_arousal = sum(e['arousal'] for e in emotional_history) / len(emotional_history)
-            avg_dominance = sum(e['dominance'] for e in emotional_history) / len(emotional_history)
-            emotional_patterns = f"""
-            Average emotional measurements:
-            - Valence (positive/negative): {avg_valence:.2f}
-            - Arousal (active/passive): {avg_arousal:.2f}
-            - Dominance (dominant/submissive): {avg_dominance:.2f}
-            """
-        
-        prompt = f"""
-        Analyze this conversation and emotional patterns. Provide insights about:
-        1. Main themes and topics discussed
-        2. Overall emotional tone and progression
-        3. Key interaction patterns
-        4. Notable moments or shifts in the conversation
-        
-        CONVERSATION:
-        {conversation}
-        
-        EMOTIONAL PATTERNS:
-        {emotional_patterns}
-        
-        Provide a concise but insightful analysis that helps understand the interaction dynamics.
-        """
-        
         try:
-            response = self.llm.chat.completions.create(
+            # Calculate emotional statistics
+            if emotional_history:
+                logger.debug(f"Analyzing emotional history with {len(emotional_history)} entries")
+                # Calculate averages for emotional dimensions
+                avg_valence = sum(e.get('valence', 0.5) for e in emotional_history) / len(emotional_history)
+                avg_arousal = sum(e.get('arousal', 0.5) for e in emotional_history) / len(emotional_history)
+                avg_dominance = sum(e.get('dominance', 0.5) for e in emotional_history) / len(emotional_history)
+                
+                # Calculate emotional ranges
+                valence_range = max(e.get('valence', 0.5) for e in emotional_history) - min(e.get('valence', 0.5) for e in emotional_history)
+                arousal_range = max(e.get('arousal', 0.5) for e in emotional_history) - min(e.get('arousal', 0.5) for e in emotional_history)
+                dominance_range = max(e.get('dominance', 0.5) for e in emotional_history) - min(e.get('dominance', 0.5) for e in emotional_history)
+            else:
+                logger.debug("No emotional history available")
+                avg_valence = avg_arousal = avg_dominance = 0.5
+                valence_range = arousal_range = dominance_range = 0.0
+            
+            # Prepare conversation summary
+            messages = []
+            for msg in chat_history:
+                if isinstance(msg, dict) and 'content' in msg and 'role' in msg:
+                    messages.append(f"{msg['role']}: {msg['content']}")
+            
+            conversation_text = "\n".join(messages[-10:])  # Last 10 messages
+            
+            # Create analysis prompt
+            analysis_prompt = f"""
+            Analyze this conversation and emotional patterns:
+            
+            Conversation (last 10 messages):
+            {conversation_text}
+            
+            Emotional Statistics:
+            - Average Valence (positivity): {avg_valence:.2f}
+            - Average Arousal (energy): {avg_arousal:.2f}
+            - Average Dominance (control): {avg_dominance:.2f}
+            - Emotional Ranges:
+              * Valence Range: {valence_range:.2f}
+              * Arousal Range: {arousal_range:.2f}
+              * Dominance Range: {dominance_range:.2f}
+            
+            Please provide:
+            1. Overall conversation tone and quality
+            2. Emotional patterns and significant shifts
+            3. Suggestions for improving interaction quality
+            """
+            
+            client = get_openai_client()
+            response = client.chat.completions.create(
                 model="gpt-4",
                 messages=[
                     {"role": "system", "content": "You are an expert in conversation analysis and emotional intelligence."},
-                    {"role": "user", "content": prompt}
+                    {"role": "user", "content": analysis_prompt}
                 ]
             )
+            
+            logger.debug("Analysis completed successfully")
             return response.choices[0].message.content
+            
         except Exception as e:
+            logger.error(f"Analysis failed: {str(e)}")
             return f"Analysis failed: {str(e)}"
+    
+    def restore_session_state(self, chat_history: List[Dict], emotional_history: List[Dict]):
+        """Restore the network state from a saved session"""
+        logger.debug("Restoring session state")
+        self.brain.restore_conversation_history(chat_history)
+        self.gut.restore_emotional_memory(emotional_history)
+        logger.debug("Session state restored")
 
 def test_llm_dual_network():
     # Initialize network
@@ -343,6 +509,7 @@ def test_llm_dual_network():
     ]
     
     for input_text in test_inputs:
+        logger.debug(f"Processing test input: {input_text[:50]}...")
         print(f"\nProcessing: {input_text}")
         response, metadata = network.process(input_text)
         print(f"Response: {response}")
@@ -353,6 +520,7 @@ def test_llm_dual_network():
     
     # Generate reflection insights
     reflection = network.brain.reflect_on_conversation()
+    logger.debug("Generating conversation reflection...")
     print("\nConversation Reflection:")
     print(json.dumps(reflection, indent=2))
 
