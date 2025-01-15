@@ -8,10 +8,18 @@ from openai import OpenAI
 from dotenv import load_dotenv, find_dotenv
 import logging
 
+# Create logs directory if it doesn't exist
+os.makedirs('logs', exist_ok=True)
+
 # Configure logging
+log_filename = os.path.join('logs', f'llm_dual_network_{datetime.now().strftime("%Y%m%d_%H%M%S")}.log')
 logging.basicConfig(
     level=logging.DEBUG,
-    format='%(asctime)s - %(name)s - %(levelname)s - %(message)s'
+    format='%(asctime)s - %(name)s - %(levelname)s - %(message)s',
+    handlers=[
+        logging.FileHandler(log_filename),
+        logging.NullHandler()  # Prevents output to terminal
+    ]
 )
 logger = logging.getLogger(__name__)
 
@@ -58,6 +66,8 @@ class LLMGutNetwork:
         self.stress_threshold = 0.7
         self.emotional_memory = []
         self.max_memory_size = 50
+        self.conversation_history = []
+        self.max_history = 10
         self.client = get_openai_client()
         logger.debug("LLMGutNetwork initialized")
     
@@ -66,6 +76,22 @@ class LLMGutNetwork:
         logger.debug("Refreshing OpenAI client for LLMGutNetwork")
         self.client = get_openai_client()
         
+    def restore_conversation_history(self, history: List[Dict]):
+        """Restore conversation history from a saved session"""
+        logger.debug(f"Restoring conversation history with {len(history)} messages")
+        # Validate and convert history format if needed
+        validated_history = []
+        for msg in history:
+            if isinstance(msg, dict) and 'content' in msg and 'role' in msg:
+                if 'metadata' in msg:
+                    # Store emotional memory from assistant messages
+                    if msg['role'] == 'assistant' and 'emotional_influence' in msg['metadata']:
+                        self.emotional_memory.append(msg['metadata']['emotional_influence'])
+                validated_history.append(msg)
+        
+        self.conversation_history = validated_history[-self.max_history:]
+        logger.debug(f"Restored {len(self.conversation_history)} conversation entries")
+    
     def process_emotional_content(self, text: str) -> Dict[str, float]:
         """Analyze emotional content of text using GPT-4"""
         logger.debug(f"Processing emotional content: {text[:50]}...")
