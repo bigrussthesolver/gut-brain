@@ -4,6 +4,12 @@
 
 The AI Dual-Network Framework implements a novel approach to AI response generation by simulating both emotional ("gut") and analytical ("brain") processing pathways. This architecture enables more nuanced, context-aware, and emotionally intelligent responses while maintaining analytical rigor.
 
+## Implementation Files
+
+- `dual-network.py`: A simple implementation of the dual-network architecture demonstrating the core concepts.
+- `llm_dual_network.py`: An advanced implementation that leverages LLM agents for enhanced processing capabilities.
+- `app.py`: A Streamlit application (work in progress) that demonstrates the concepts of the gut-brain network
+
 ## System Architecture
 
 ### Dual Processing Networks
