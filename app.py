@@ -78,53 +78,37 @@ def save_session():
     logger.debug(f"Session saved to {filepath}")
     return filepath
 
-def load_session():
+def load_session(filepath: Path) -> bool:
     """Load a session from a file"""
-    logger.debug("Attempting to load session")
-    session_files = list(OUTPUT_DIR.glob("*.json"))
-    if not session_files:
-        logger.debug("No session files found")
-        return None
-    
-    with st.sidebar:
-        st.subheader("Load Session")
-        session_file = st.selectbox("Select a session file", [file.name for file in session_files])
-        if st.button("Load Session"):
-            try:
-                filepath = OUTPUT_DIR / session_file
-                logger.debug(f"Loading session from {filepath}")
-                with open(filepath, 'r', encoding='utf-8') as f:
-                    session_data = json.load(f)
-                
-                # Save current session before loading new one
-                if st.session_state.get('chat_history'):
-                    logger.debug("Saving current session before loading new one")
-                    save_session()
-                
-                # Reset state before loading new session
-                logger.debug("Resetting state before loading new session")
-                reset_session_state()
-                
-                # Load new session data
-                logger.debug("Loading new session data")
-                st.session_state.chat_history = session_data['chat_history']
-                st.session_state.emotional_history = session_data['emotional_history']
-                st.session_state.session_id = session_data['session_id']
-                st.session_state.session_start_time = session_data['start_time']
-                
-                # Restore conversation context in the network
-                logger.debug("Restoring conversation context")
-                st.session_state.network.restore_session_state(
-                    st.session_state.chat_history,
-                    st.session_state.emotional_history
-                )
-                
-                logger.debug(f"Session loaded successfully: {session_data['session_id']}")
-                st.success(f"Session loaded from: {filepath.name}")
-                st.rerun()
-            except Exception as e:
-                logger.error(f"Error loading session: {str(e)}")
-                st.error(f"Error loading session: {str(e)}")
+    try:
+        logger.debug(f"Loading session from {filepath}")
+        with open(filepath, 'r', encoding='utf-8') as f:
+            session_data = json.load(f)
+        
+        # Save current session if it exists
+        if st.session_state.chat_history:
+            save_session()
+        
+        # Load selected session
+        st.session_state.chat_history = session_data['chat_history']
+        st.session_state.emotional_history = session_data.get('emotional_history', [])
+        st.session_state.session_id = session_data['session_id']
+        st.session_state.session_start_time = session_data['start_time']
+        
+        # Create fresh network instance
+        st.session_state.network = LLMDualNetwork()
+        
+        # Restore conversation context in both networks
+        logger.debug("Restoring conversation history in networks")
+        st.session_state.network.brain.restore_conversation_history(session_data['chat_history'])
+        st.session_state.network.gut.restore_conversation_history(session_data['chat_history'])
+        
+        logger.debug("Session loaded successfully")
+        return True
+        
+    except Exception as e:
+        logger.error(f"Error loading session: {str(e)}")
+        return False
 
 def reset_session_state():
     """Reset all session state variables to their initial values"""
@@ -192,16 +176,40 @@ def validate_message(message: Dict) -> Dict:
         
     return message
 
-def display_chat_message(role: str, content: str, metadata: Dict = None):
+def display_chat_message(role: str, content: str, metadata: Dict = None, show_metadata: bool = True):
     """Display a chat message with optional metadata"""
     if role == "user":
         st.chat_message("user").write(content)
     else:
         with st.chat_message("assistant"):
             st.write(content)
-            if metadata:
-                with st.expander("Message Metadata"):
+            if metadata and show_metadata:
+                with st.expander("View Message Details", expanded=False):
+                    # Display emotional influence if present
+                    if 'emotional_influence' in metadata:
+                        emotions = metadata['emotional_influence']
+                        cols = st.columns(3)
+                        with cols[0]:
+                            st.metric("Valence", f"{emotions['valence']:.2f}")
+                        with cols[1]:
+                            st.metric("Arousal", f"{emotions['arousal']:.2f}")
+                        with cols[2]:
+                            st.metric("Dominance", f"{emotions['dominance']:.2f}")
+                    
+                    # Display other metadata
+                    st.write("**Full Metadata:**")
                     st.json(metadata)
+
+def display_session_messages(messages: List[Dict], in_expander: bool = False):
+    """Display a list of messages, with special handling for expander contexts"""
+    for msg in messages:
+        if isinstance(msg, dict) and 'content' in msg and 'role' in msg:
+            display_chat_message(
+                msg['role'],
+                msg['content'],
+                msg.get('metadata', None),
+                show_metadata=not in_expander
+            )
 
 def create_radar_chart(emotional_state):
     """Create a radar chart for emotional state visualization"""
@@ -290,15 +298,35 @@ def load_session_analyses() -> List[Dict]:
     
     return sorted(analyses, key=lambda x: x['timestamp'], reverse=True)
 
-# App title and description
-st.title("Emotional AI Interaction System")
-st.markdown("""
-This system demonstrates an AI that processes both the content and emotional aspects of communication.
-The visualization shows the emotional state analysis and how it influences responses.
-""")
+# Initialize Streamlit app
+st.set_page_config(page_title="Gut-Brain Network", layout="wide")
 
-# Session management buttons in the sidebar
+# Custom CSS for styling
+st.markdown("""
+<style>
+    .stTabs [data-baseweb="tab-list"] {
+        gap: 2px;
+    }
+    .stTabs [data-baseweb="tab"] {
+        padding: 10px 20px;
+        background-color: #f0f2f6;
+        border-radius: 4px 4px 0 0;
+    }
+    .stTabs [aria-selected="true"] {
+        background-color: #ffffff;
+    }
+</style>
+""", unsafe_allow_html=True)
+
+# Initialize session state if needed
+if 'chat_history' not in st.session_state:
+    reset_session_state()
+
+# Sidebar UI
 with st.sidebar:
+    st.title("Settings & Controls")
+    
+    # Session Management
     st.subheader("Session Management")
     col1, col2 = st.columns(2)
     with col1:
@@ -311,120 +339,190 @@ with st.sidebar:
         if st.button("Save Session", key="save_session"):
             filepath = save_session()
             st.success(f"Session saved to: {filepath.name}")
-            
-    # Add analyze button
-    if st.button("Analyze Session", key="analyze_session"):
+    
+    # Load Previous Session
+    st.subheader("Load Session")
+    session_files = list(OUTPUT_DIR.glob("session_*.json"))
+    if session_files:
+        selected_file = st.selectbox(
+            "Select session to load",
+            options=session_files,
+            format_func=lambda x: f"Session {x.stem.split('_')[1]} ({x.stem.split('_')[2]})",
+            key="load_session_select"
+        )
+        
+        if st.button("Load Selected Session", key="load_session"):
+            if load_session(selected_file):
+                st.success(f"Loaded session from {selected_file.name}")
+                st.rerun()
+            else:
+                st.error("Failed to load session. Check the logs for details.")
+    else:
+        st.info("No saved sessions found")
+    
+    # Display current session info
+    st.subheader("Current Session")
+    st.info(f"Session ID: {st.session_state.session_id[:8]}...")
+    st.info(f"Started: {datetime.fromisoformat(st.session_state.session_start_time).strftime('%Y-%m-%d %H:%M:%S')}")
+    
+    # System stress level
+    if st.session_state.chat_history:
+        latest_response = st.session_state.chat_history[-1]
+        if isinstance(latest_response, dict) and 'metadata' in latest_response:
+            metadata = latest_response['metadata']
+            if isinstance(metadata, dict) and 'stress_level' in metadata:
+                stress_level = metadata['stress_level']
+                st.metric("System Stress Level", f"{stress_level:.2f}")
+    
+    # Quick Analysis
+    st.subheader("Quick Analysis")
+    if st.button("Generate Analysis", key="quick_analysis"):
         if not st.session_state.get('chat_history'):
             st.warning("No conversation to analyze yet.")
         else:
             with st.spinner("Analyzing conversation..."):
-                # Get analysis
                 analysis = st.session_state.network.analyze_session(
                     st.session_state.chat_history,
                     st.session_state.emotional_history
                 )
-                
                 # Save analysis
                 analysis_file = save_analysis(analysis)
                 st.session_state.session_analysis = analysis
                 st.success(f"Analysis saved to: {analysis_file.name}")
                 st.rerun()
-    
-    # Display analysis if available
-    if st.session_state.get('session_analysis'):
-        st.subheader("Session Analysis")
-        st.markdown(st.session_state.session_analysis)
-    
-    # Display previous analyses
-    st.subheader("Previous Analyses")
-    analyses = load_session_analyses()
-    for analysis in analyses:
-        with st.expander(f"Analysis {analysis['timestamp']}"):
-            st.markdown(f"**Session ID:** {analysis['session_id']}")
-            st.markdown(f"**Messages:** {analysis['chat_history_length']}")
-            st.markdown(f"**Session File:** {analysis['session_file']}")
-            st.markdown("**Analysis:**")
-            st.markdown(analysis['analysis_text'])
 
-    load_session()
-    
-    # Display current session info
-    st.info(f"Session ID: {st.session_state.session_id[:8]}...")
-    st.info(f"Started: {datetime.fromisoformat(st.session_state.session_start_time).strftime('%Y-%m-%d %H:%M:%S')}")
-    
-    # Emotional state visualization
-    st.subheader("System State")
-    if st.session_state.emotional_history:
-        latest_emotional_state = st.session_state.emotional_history[-1]
-        radar_chart = create_radar_chart(latest_emotional_state)
-        st.plotly_chart(radar_chart, use_container_width=True)
-        
-        timeline = create_emotion_timeline()
-        if timeline:
-            st.plotly_chart(timeline, use_container_width=True)
-    
-    # System stress level
-    if st.session_state.chat_history:
-        latest_response = st.session_state.chat_history[-1]
-        if 'metadata' in latest_response and 'stress_level' in latest_response['metadata']:
-            stress_level = latest_response['metadata']['stress_level']
-            st.metric("System Stress Level", f"{stress_level:.2f}")
+# Create tabs
+tab_chat, tab_history = st.tabs(["Chat", "History & Analysis"])
 
-# Handle new session request
-if st.session_state.new_session_requested:
-    reset_session_state()
-    st.rerun()
-
-# Process new messages
-if prompt := st.chat_input("Enter your message..."):
-    try:
-        logger.debug(f"Processing new message: {prompt[:50]}...")
-        # Process through dual network
-        response, metadata = st.session_state.network.process(prompt)
-        
-        # Update session state
-        timestamp = datetime.now().isoformat()
-        
-        # Add user message
-        user_message = {
-            "role": "user",
-            "content": prompt,
-            "timestamp": timestamp
-        }
-        
-        # Add assistant message
-        assistant_message = {
-            "role": "assistant",
-            "content": response,
-            "metadata": metadata,
-            "timestamp": timestamp
-        }
-        
-        # Update chat history
-        st.session_state.chat_history.extend([user_message, assistant_message])
-        
-        # Store emotional state
-        if 'emotional_influence' in metadata:
-            st.session_state.emotional_history.append(metadata['emotional_influence'])
+with tab_chat:
+    # Header with emotional state visualization
+    st.title("Gut-Brain Network")
+    
+    st.markdown("""
+    This AI integrates both emotional (gut) and rational (brain) processing to provide more nuanced and context-aware responses.
+    """)
+    
+    # Display current emotional state if available
+    if st.session_state.get('emotional_history'):
+        current_emotional_state = st.session_state.emotional_history[-1]
+        fig = create_radar_chart(current_emotional_state)
+        st.plotly_chart(fig, use_container_width=True)
+    
+    # Process new messages
+    if prompt := st.chat_input("Enter your message..."):
+        try:
+            logger.debug(f"Processing new message: {prompt[:50]}...")
+            # Process through dual network
+            response, metadata = st.session_state.network.process(prompt)
             
-        # Rerun to update UI with new state
-        st.rerun()
-        
-    except Exception as e:
-        logger.error(f"An error occurred: {str(e)}")
-        st.error(f"An error occurred: {str(e)}")
+            # Update session state
+            timestamp = datetime.now().isoformat()
+            
+            # Add user message
+            user_message = {
+                "role": "user",
+                "content": prompt,
+                "timestamp": timestamp
+            }
+            
+            # Add assistant message
+            assistant_message = {
+                "role": "assistant",
+                "content": response,
+                "metadata": metadata,
+                "timestamp": timestamp
+            }
+            
+            # Update chat history
+            st.session_state.chat_history.extend([user_message, assistant_message])
+            
+            # Store emotional state
+            if 'emotional_influence' in metadata:
+                st.session_state.emotional_history.append(metadata['emotional_influence'])
+                
+            # Rerun to update UI with new state
+            st.rerun()
+            
+        except Exception as e:
+            logger.error(f"An error occurred: {str(e)}")
+            st.error(f"An error occurred: {str(e)}")
+    
+    # Display chat history
+    if st.session_state.get('chat_history'):
+        display_session_messages(st.session_state.chat_history)
 
-# Display chat history
-if st.session_state.get('chat_history'):
-    for message in st.session_state.chat_history:
-        # Validate message format
-        valid_message = validate_message(message)
-        if valid_message:
-            display_chat_message(
-                valid_message['role'],
-                valid_message['content'],
-                valid_message.get('metadata', None)
-            )
+with tab_history:
+    st.title("Session History & Analysis")
+    
+    # Session Information
+    st.subheader("Current Session Info")
+    st.write(f"Session ID: {st.session_state.session_id}")
+    st.write(f"Started: {st.session_state.session_start_time}")
+    
+    # Emotional Trajectory
+    if st.session_state.get('emotional_history'):
+        st.subheader("Emotional Trajectory")
+        
+        # Create emotional trajectory plot
+        fig = go.Figure()
+        
+        # Extract timestamps and values
+        timestamps = [msg['timestamp'] for msg in st.session_state.chat_history if msg['role'] == 'assistant'][-len(st.session_state.emotional_history):]
+        
+        # Add traces for each emotional dimension
+        for dimension in ['valence', 'arousal', 'dominance']:
+            values = [e[dimension] for e in st.session_state.emotional_history]
+            fig.add_trace(go.Scatter(
+                x=timestamps,
+                y=values,
+                name=dimension.capitalize(),
+                mode='lines+markers'
+            ))
+        
+        fig.update_layout(
+            title="Emotional Dimensions Over Time",
+            xaxis_title="Time",
+            yaxis_title="Value",
+            yaxis_range=[0, 1],
+            height=400
+        )
+        
+        st.plotly_chart(fig, use_container_width=True)
+    
+    # Session Analysis
+    st.subheader("Detailed Analysis")
+    if len(st.session_state.chat_history) > 1:
+        if st.button("Generate Detailed Analysis", key="detailed_analysis"):
+            with st.spinner("Analyzing conversation..."):
+                analysis = st.session_state.network.analyze_session(
+                    st.session_state.chat_history,
+                    st.session_state.emotional_history
+                )
+                st.markdown(analysis)
+    else:
+        st.info("Start a conversation to generate analysis.")
+    
+    # Previous Sessions
+    st.subheader("Previous Sessions")
+    session_files = list(OUTPUT_DIR.glob("session_*.json"))
+    if session_files:
+        selected_session = st.selectbox(
+            "Select a session to view",
+            options=session_files,
+            format_func=lambda x: f"Session {x.stem.split('_')[1]} ({x.stem.split('_')[2]})",
+            key="view_session_select"
+        )
+        
+        if selected_session:
+            with open(selected_session, 'r', encoding='utf-8') as f:
+                session_data = json.load(f)
+                
+            st.write(f"Session ID: {session_data['session_id']}")
+            st.write(f"Start Time: {session_data['start_time']}")
+            st.write(f"End Time: {session_data['end_time']}")
+            
+            with st.expander("View Conversation"):
+                display_session_messages(session_data['chat_history'], in_expander=True)
 
 # Footer with system information
 st.markdown("---")
@@ -442,3 +540,8 @@ with st.expander("About this System"):
     Sessions are automatically saved in the 'output' directory with timestamps
     for future reference and analysis.
     """)
+
+# Handle new session request
+if st.session_state.new_session_requested:
+    reset_session_state()
+    st.rerun()
