@@ -41,7 +41,7 @@ venv.bak/
 # Project specific
 output/
 analysis/
-SCRATCH_FOLDER/
+SCRATCH_FOLDER
 *.log
 .env
 .streamlit/secrets.toml
